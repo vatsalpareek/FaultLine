@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+:root {
+  /* LIGHT MODE (Default fallback, but we'll manage via data-theme) */
+  --theme-bg-900: #ffffff;
+  --theme-bg-800: #f8fafc;
+  --theme-bg-700: #f1f5f9;
+  
+  --theme-text-white: #0f172a;
+  --theme-text-200: #1e293b;
+  --theme-text-300: #334155;
+  --theme-text-400: #475569;
+  --theme-text-500: #64748b;
+
+  --theme-fault-red: #e60000;
+  --theme-fault-red-glow: rgba(230, 0, 0, 0.3);
+}
+
+:root[data-theme="dark"] {
+  /* DARK MODE (Original Theme) */
+  --theme-bg-900: #111111;
+  --theme-bg-800: #1a1a1a;
+  --theme-bg-700: #2a2a2a;
+  
+  --theme-text-white: #ffffff;
+  --theme-text-200: #e5e7eb;
+  --theme-text-300: #d1d5db;
+  --theme-text-400: #9ca3af;
+  --theme-text-500: #6b7280;
+
+  --theme-fault-red: #ff3333;
+  --theme-fault-red-glow: rgba(255, 51, 51, 0.5);
+}
+
+@theme {
+  --color-charcoal-900: var(--theme-bg-900);
+  --color-charcoal-800: var(--theme-bg-800);
+  --color-charcoal-700: var(--theme-bg-700);
+  
+  --color-white: var(--theme-text-white);
+  --color-gray-200: var(--theme-text-200);
+  --color-gray-300: var(--theme-text-300);
+  --color-gray-400: var(--theme-text-400);
+  --color-gray-500: var(--theme-text-500);
+
+  --color-fault-red: var(--theme-fault-red);
+  --color-fault-red-glow: var(--theme-fault-red-glow);
+
+  --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@utility bg-grid-pattern {
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+@utility text-glow {
+  text-shadow: 0 0 10px var(--color-fault-red-glow);
+}
+
+@utility animate-icon-pop {
+  animation: icon-pop 0.4s ease-in-out;
+}
+
+@utility animate-app-reveal {
+  animation: app-reveal 0.5s ease-in forwards;
+}
+
+@keyframes icon-pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.25) rotate(-5deg); }
+  70% { transform: scale(0.9) rotate(5deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+
+@keyframes app-reveal {
+  0% { opacity: 0; }
+  99% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+body {
+  @apply bg-charcoal-900 text-gray-200 font-sans antialiased overflow-x-hidden;
+}
