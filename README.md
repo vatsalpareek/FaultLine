@@ -1,383 +1,282 @@
-# FaultLine
+# FaultLine — User Manual
 
-**Predicts where a distributed system will break, breaks it on purpose, and checks whether the prediction was right.**
+## 1. What is FaultLine?
 
-Most reliability tooling waits for something to go wrong and then helps you read the
-wreckage. FaultLine goes the other way. It reads your `docker-compose.yml` and `.env`,
-works out which dependency is under-provisioned for the load it will see, states in
-advance what the symptoms should look like, then injects a fault and compares what it
-measured against what it predicted.
+FaultLine is a predictive reliability-testing platform for distributed systems.
 
-The output is not "something looks slow". It is:
+Instead of waiting for a failure to happen, FaultLine:
 
-> **RISK-001 · Connection Pool Exhaustion → redis · CRITICAL 82**
-> Redis allows 10 connections held up to 1000 ms each. That caps throughput at
-> 10 req/s against an assumed 100 req/s.
-> Predicted: saturation reaches 100%, latency rises, timeouts appear.
-> Measured: `redis.saturation` 0.0 → 445.8, `redis.latency` 2.0 → 500.0 ms.
-> **REPRODUCED** — `redis.saturation` confirmed the predicted mechanism.
+**Understands → Predicts → Tests → Measures → Investigates → Verdicts**
+
+It analyzes the system configuration, predicts possible failure modes, and validates those predictions through controlled experiments.
 
 ---
 
-## Table of contents
+## 2. Getting Started
 
-- [How it works](#how-it-works)
-- [Quick start](#quick-start)
-- [Using it on your own system](#using-it-on-your-own-system)
-- [The dashboard](#the-dashboard)
-- [Reading a verdict](#reading-a-verdict)
-- [The failure rules](#the-failure-rules)
-- [How the measurement works](#how-the-measurement-works)
-- [Project layout](#project-layout)
-- [API reference](#api-reference)
-- [Deploying](#deploying)
-- [Known limits](#known-limits)
+The FaultLine dashboard contains five main sections:
 
----
+* **Overview** — Start and monitor analysis
+* **Architecture** — Understand the system structure
+* **Spider-Sense** — View predicted risks
+* **Investigation** — Understand test results
+* **Web Hunt** — Inspect the underlying evidence
 
-## How it works
+The normal workflow is:
 
-```
-your-project.zip                 a Compose file and an env file
-        │
-        ▼
-  SYSTEM UNDERSTANDING           services, depends_on, timeouts, pool sizes,
-        │                        retry counts, and the dependency graph
-        ▼
-  HYPOTHESIS ENGINE              failure rules run against that model and
-        │                        produce ranked, evidenced predictions
-        ▼
-  EXPERIMENT                     a fault is injected into a running instance
-        │                        while sustained load is applied
-        ▼
-  ANOMALY DETECTION              windowed telemetry compared against a
-        │                        baseline captured moments earlier
-        ▼
-  INVESTIGATION                  anomaly timing plus the dependency graph
-        │                        gives a root cause with a confidence score
-        ▼
-  VERDICT                        REPRODUCED / PARTIAL / NOT REPRODUCED
-```
-
-Two of these stages need nothing but your config files. **Hypotheses work offline.**
-Only the experiment stage needs a running copy of the system.
-
----
-
-## Quick start
-
-You need Python 3.10+ and Node 18+.
-
-```bash
-git clone <this-repo> faultline
-cd faultline
-
-# 1. install
-pip install -r requirements.txt
-cd frontend && npm install && npm run build && cd ..
-
-# 2. start the API (it also serves the dashboard)
-uvicorn api:app --port 5050
-```
-
-Open **http://localhost:5050** and upload `orderflow-sample.zip` from the repository
-root. You will immediately see the dependency graph and three ranked hypotheses.
-
-To also run the experiments you need something to break. This repo ships a stand-in:
-
-```bash
-python mock_orderflow.py        # serves /metrics and /internal/fault/* on :8000
-```
-
-Then on the Overview page, connect to `http://127.0.0.1:8000` and press
-**Run all experiments**.
-
-### Developing the frontend
-
-```bash
-cd frontend && npm run dev      # http://localhost:5173, proxies /api to :5050
+```text
+Upload System
+      ↓
+Architecture
+      ↓
+Spider-Sense
+      ↓
+Connect Target
+      ↓
+Run Experiments
+      ↓
+Investigation
+      ↓
+Web Hunt
 ```
 
 ---
 
-## Using it on your own system
+## 3. Upload Your System
 
-### Step 1 — package your config
+From **Overview**, upload the provided:
 
-Zip up a Compose file and an env file. Nested folders are fine, FaultLine searches
-the whole tree.
+**`orderflow-phase3.zip`**
 
-```
-my-system.zip
-├── docker-compose.yml
-└── .env.example
-```
+> **For the FaultLine demonstration, upload `orderflow-phase3.zip`.**
 
-Accepted names: `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`,
-`compose.yaml`, and anything starting with `.env`.
+FaultLine analyzes the uploaded configuration and identifies:
 
-### Step 2 — make sure the env file describes the dependencies
+* Services
+* Dependencies
+* Configuration
+* Potential risks
 
-The hypothesis rules read specific variables. Out of the box FaultLine understands:
-
-| Component | Variables |
-| --- | --- |
-| API service | `API_WORKERS`, `REQUEST_TIMEOUT_MS` |
-| Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_TIMEOUT_MS`, `REDIS_RETRY_COUNT`, `REDIS_MAX_CONNECTIONS`, `REDIS_CACHE_TTL_SECONDS` |
-| MySQL | `DB_HOST`, `DB_PORT`, `DB_MAX_CONNECTIONS`, `DB_QUERY_TIMEOUT_MS` |
-
-To support different names, edit `SCHEMA` in `system_understanding/env_parser.py`.
-That map is the only place component names and env keys are coupled.
-
-Without pool sizes and timeouts there is nothing to reason about, so a project with
-a Compose file but no meaningful env values will produce a graph and zero hypotheses.
-That is correct behaviour, not a failure.
-
-### Step 3 — instrument the running system (only if you want experiments)
-
-Reading hypotheses needs nothing. Running experiments needs your application to expose
-two things:
-
-**`GET /metrics`** returning cumulative counters per component:
-
-```json
-{
-  "api":   { "requests": 0, "errors": 0, "timeouts": 0, "latency_total_ms": 0.0 },
-  "redis": { "ops": 0, "errors": 0, "timeouts": 0, "retries": 0,
-             "latency_total_ms": 0.0, "saturation_pct": 0.0 },
-  "mysql": { "queries": 0, "errors": 0, "latency_total_ms": 0.0,
-             "saturation_pct": 0.0 }
-}
-```
-
-**`POST /internal/fault/{redis,database}`** and **`POST /internal/fault/reset`**:
-
-```json
-{ "type": "latency", "value_ms": 500, "duration_sec": 30 }
-```
-
-`mock_orderflow.py` is a complete reference implementation of both, in about
-120 lines. Read it if you are adding this to your own service.
-
-FaultLine probes for these when you connect a target and tells you which are missing.
+After the upload, the system graph and predicted risks become available.
 
 ---
 
-## The dashboard
+## 4. Architecture
 
-| Page | What it shows |
-| --- | --- |
-| **Overview** | Upload, connect a target, risk score, ranked predictions, live run log |
-| **Architecture** | The dependency graph parsed from Compose, with per-node config and the hypotheses against each component |
-| **Spider-Sense** | Every hypothesis: the reasoning, the exact evidence, what would prove it, and how to fix it |
-| **Investigation** | Prediction against measurement, per predicted symptom, plus causal chain, root cause and remediation |
-| **Web Hunt** | Raw telemetry: baseline mean, spread, observed value, delta and sigma per signal, plus the per-sample trace and JSON export |
+Open **Architecture** to see how the system is connected.
 
-Every page shows **Data not available** until a project is uploaded.
+The graph shows:
 
----
+* Components
+* Dependencies
+* Configuration
+* Dependent services
+* Associated risks
 
-## Reading a verdict
+Use the graph to understand:
 
-| Verdict | Meaning |
-| --- | --- |
-| **REPRODUCED** | The predicted *mechanism* was measured. Not a side effect of the injection. |
-| **PARTIAL** | The fault landed, but the mechanism signal never breached. The prediction is unproven. |
-| **NOT REPRODUCED** | Nothing predicted crossed its threshold. The system held. |
-| **NOT EXERCISED** | The load never reached the component, so nothing was tested. |
-| **ERROR** | The experiment could not complete. |
-
-The distinction between REPRODUCED and PARTIAL matters more than it looks. If you inject
-500 ms of latency, latency rising proves the injection worked, not that the connection
-pool exhausted. Each experiment nominates a separate **mechanism signal**:
-
-| Experiment | Fault confirmation | Mechanism signal |
-| --- | --- | --- |
-| pool exhaustion | `target.latency` | `target.saturation` |
-| retry escalation | `target.latency` | `target.retries` |
-| timeout propagation | `target.latency` | `api.latency` |
-
-REPRODUCED requires the mechanism. A run that only moves latency is PARTIAL.
-
-**NOT EXERCISED** is equally deliberate. Reporting a database risk as refuted when the
-database never received a query would be a false negative dressed as a clean bill of health.
+> **If this component fails, what could be affected?**
 
 ---
 
-## The failure rules
+## 5. Spider-Sense
 
-Three rules, all deterministic. No model, no training data, no randomness.
+**Spider-Sense** is FaultLine's risk and hypothesis view.
 
-### Connection pool exhaustion
+Each hypothesis shows:
 
-Capacity is modelled with Little's Law: a pool of N connections held H seconds each
-sustains **N / H** requests per second.
+* **Prediction** — What could go wrong
+* **Evidence** — Why FaultLine expects it
+* **Expected symptoms** — What would prove it
+* **Blast radius** — What could be affected
+* **Remediation** — How the risk can be reduced
 
-```
-10 connections ÷ 1.0 s hold = 10 req/s capacity
-                              against an assumed 100 req/s
-```
+You can either:
 
-Fires when capacity falls below the assumed workload. Beyond that point requests queue
-for a free connection, so latency rises before anything reports an error, which is why
-this failure is usually diagnosed late.
+**Run all experiments**
 
-### Timeout propagation
+or
 
-Fires when one dependency can consume more than half the caller's entire request budget.
-
-```
-redis: 1000 ms × 3 attempts = 3000 ms worst case
-api request timeout          = 5000 ms
-                               60% of the budget owned by one dependency
-```
-
-The dependency's latency passes straight through to the client, and when the caller
-aborts it reports a generic timeout with no indication of which dependency was at fault.
-
-### Retry escalation
-
-Fires when a dependency has retries configured.
-
-```
-retry_count = 2  →  3 attempts  →  3x load
-```
-
-When the dependency slows down, every request becomes up to three requests, adding load
-to the component that is already the bottleneck. The failure feeds itself.
-
-### Scoring
-
-```
-score = 100 × (0.5 × how dangerous the failure class is
-             + 0.3 × how far the config sits past a safe limit
-             + 0.2 × how much of the system is downstream)
-```
-
-Bands: CRITICAL ≥ 80, HIGH ≥ 60, MEDIUM ≥ 40.
-
-Assumptions live at the top of `Red Team/Hypothesis.py`. `TARGET_RPS` defaults to 100.
-Change it and the risks change; that is a real knob, not a magic number.
+**Test one specific hypothesis.**
 
 ---
 
-## How the measurement works
+## 6. Connect the Target
 
-Three details decide whether the numbers mean anything.
+From **Overview**, connect the running OrderFlow target.
 
-**Latency is windowed, not lifetime.** `/metrics` reports an average since process start.
-After a few hundred requests, a single 2400 ms request barely moves it. FaultLine takes
-two reads and computes `Δlatency_total_ms ÷ Δoperations` instead.
+The dashboard shows whether the target is reachable and whether controlled fault injection is available.
 
-**Load runs for the whole observation window.** Saturation is a point-in-time gauge. A
-burst of requests that finishes in one second while telemetry is sampled over ten reads
-as an idle pool. Load workers keep firing until sampling completes.
-
-**A signal must be both statistically unusual and materially different.** An idle baseline
-has near-zero variance, so ordinary traffic can look like an eight-sigma event. Alongside
-the z-score there is a floor: latency must move 25 ms, saturation 25 points, counters by
-at least one.
-
-Sanity check before you trust a run: apply the load with **no fault injected**. It should
-score zero. If it does not, your baseline is contaminated.
+If the target is unavailable, the predictions can still be viewed, but experiments cannot be executed.
 
 ---
 
-## Project layout
+## 7. Run Experiments
 
-```
-faultline/
-├── api.py                    FastAPI server, also serves the dashboard
-├── main.py                   the same pipeline as a CLI
-├── mock_orderflow.py         reference instrumented target
-├── orderflow-sample.zip      sample project, upload this to try it
-├── requirements.txt
-│
-├── system_understanding/     config in, dependency model out
-│   ├── compose_parser.py     services and depends_on
-│   ├── env_parser.py         timeouts, pool sizes, retry counts
-│   ├── graph_generator.py    NetworkX dependency graph
-│   └── system_model.py       combines both into one model
-│
-├── Red Team/
-│   ├── Hypothesis.py         the failure rules and scoring
-│   ├── baseline.py           telemetry sampling and baseline capture
-│   ├── experiment.py         fault injection and sustained load
-│   ├── detector.py           z-scores, verdicts, anomaly extraction
-│   ├── investigator.py       root cause from timing plus the graph
-│   └── models.py             shared dataclasses
-│
-└── frontend/                 React 19 + Vite + Tailwind dashboard
-    ├── src/lib/api.js        every backend call lives here
-    ├── src/context/          project and analysis state
-    └── src/pages/            the five pages
+Select **Run all experiments** or test an individual hypothesis.
+
+Each experiment follows:
+
+```text
+Baseline
+   ↓
+Inject controlled fault
+   ↓
+Generate workload
+   ↓
+Collect telemetry
+   ↓
+Reset system
+   ↓
+Detect anomalies
+   ↓
+Investigate
 ```
 
-Run the whole pipeline headless with `python main.py`.
+During execution, the dashboard displays live events such as:
+
+* Capturing baseline
+* Fault injected
+* Experiment result
+* Run complete
 
 ---
 
-## API reference
+## 8. Investigation
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/health` | server status |
-| `GET` | `/api/project` | what is loaded |
-| `POST` | `/api/project/upload` | multipart zip |
-| `DELETE` | `/api/project` | unload and clean up |
-| `POST` | `/api/target` | point experiments at a running instance |
-| `GET` | `/api/target/health` | probe that instance for `/metrics` and fault routes |
-| `GET` | `/api/system` | nodes, edges, indirect paths, config, layout |
-| `GET` | `/api/risks` | hypotheses, severity counts, risk score |
-| `GET` | `/api/results` | findings from the last run |
-| `POST` | `/api/run` | run experiments (`?risk_id=RISK-001` for one) |
-| `GET` | `/api/run/status` | progress and live log |
+After testing, open **Investigation**.
 
-`/api/system` and `/api/risks` are recomputed on every call, so editing your env file,
-re-zipping and re-uploading changes the risks immediately.
+This is the main result view.
 
----
+### Prediction
 
-## Deploying
+What FaultLine expected before testing.
 
-One process, one port:
+### Predicted vs Measured
 
-```bash
-cd frontend && npm run build && cd ..
-uvicorn api:app --host 0.0.0.0 --port 5050
+Compares the expected symptom with actual telemetry.
+
+```text
+Predicted
+Signal
+Baseline
+Measured
+Result
 ```
 
-`api.py` serves `frontend/dist` at `/`, keeps `/api/*` for itself, and handles SPA deep
-links. The backend must be able to reach the target system over the network, so for
-experiments run it on the same host or network as the system under test.
+### Causal Chain
 
-Uploads go to `uploads/` and the previous project is deleted when a new one arrives.
-Add `uploads/` to `.gitignore`.
+Shows the order in which important anomalies appeared.
 
----
+### Root Cause
 
-## Known limits
+Shows the likely cause, confidence, and supporting evidence.
 
-**Redis-focused by default.** `TESTABLE_TARGETS` in `Red Team/Hypothesis.py` is
-`{"redis"}`. In the sample OrderFlow system, `/products` reads through the cache, so a
-MySQL fault is invisible from that route: every read after the first is a cache hit and
-the database is never queried. Rather than raise a database risk that cannot be tested,
-FaultLine leaves it out. To include a database, point `TRAFFIC_PATH["mysql"]` in
-`Red Team/baseline.py` at a route that always queries it, then add `"mysql"` to
-`TESTABLE_TARGETS`.
+### Blast Radius
 
-**Anomaly scores saturate at 1.0.** An 800 ms latency against a 12 ms baseline is roughly
-1500 sigma. The score is a threshold, not a magnitude. The raw numbers are on Web Hunt.
+Compares:
 
-**Compose `depends_on` is the source of truth for dependencies.** A service that talks
-to another without declaring it will not appear as an edge.
+**Predicted impact vs Observed impact**
 
-**Three rules only.** They cover the pool, timeout and retry families. Additional rules
-go in `Red Team/Hypothesis.py` next to the existing ones; each needs a matching
-experiment and a mechanism signal in `detector.py`.
+### Remediation
+
+Shows configuration-based recommendations.
 
 ---
 
-## Licence
+## 9. Understanding the Verdict
 
-MIT.
+FaultLine does not consider a fault injection alone to be a reproduced failure.
+
+It checks:
+
+1. **Did the fault actually reach the target?**
+2. **Did the predicted failure mechanism occur?**
+
+| Verdict            | Meaning                                                 |
+| ------------------ | ------------------------------------------------------- |
+| **REPRODUCED**     | Fault landed and the predicted mechanism occurred       |
+| **PARTIAL**        | Fault landed, but the mechanism was not fully confirmed |
+| **NOT_REPRODUCED** | Expected failure was not reproduced                     |
+| **NOT_EXERCISED**  | Required path or mechanism was not exercised            |
+| **ERROR**          | Experiment could not complete                           |
+
+---
+
+## 10. Web Hunt
+
+Use **Web Hunt** to inspect the evidence behind a verdict.
+
+For each signal, you can see:
+
+* Baseline
+* Observed value
+* Change
+* Spread
+* Sigma
+
+Anomalous signals are highlighted, and individual telemetry samples can be inspected.
+
+> **Investigation explains the result. Web Hunt lets you verify the evidence.**
+
+---
+
+## 11. Recommended Demo Flow
+
+For the strongest demonstration:
+
+```text
+1. Upload orderflow-phase3.zip
+        ↓
+2. Show Architecture
+        ↓
+3. Open Spider-Sense
+        ↓
+4. Explain the predicted risk
+        ↓
+5. Connect the target
+        ↓
+6. Run the experiment
+        ↓
+7. Watch the live execution
+        ↓
+8. Open Investigation
+        ↓
+9. Compare predicted vs measured
+        ↓
+10. Open Web Hunt
+```
+
+The core FaultLine story is:
+
+```text
+Configuration
+      ↓
+Prediction
+      ↓
+Controlled Experiment
+      ↓
+Telemetry
+      ↓
+Mechanism Validation
+      ↓
+Investigation
+      ↓
+Verdict
+```
+
+---
+
+## 12. Important Note
+
+A **successful fault injection does not automatically mean the predicted failure was reproduced**.
+
+FaultLine deliberately separates:
+
+**“The fault happened”**
+
+from
+
+**“The predicted failure mechanism happened.”**
+
+This distinction is essential when interpreting the final verdict.
